@@ -7,7 +7,7 @@ on:
     branches: [ "main" ]
 
 jobs:
-  tests:
+  security-scan:
    runs-on: ubuntu-latest
    permissions:
      security-events: write
@@ -28,6 +28,71 @@ jobs:
         with:
           # Path to SARIF file relative to the root of the repository
           sarif_file: results.sarif
+
+  test-verify:
+    needs: security-scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run Tests
+        run: go test -v ./...
+
+  terraform:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.reg == 'refs/heads/main'
+
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    outputs:
+      repo_url: ${{ steps.tf_outputs.outputs.repo_url }}
+      service_name: ${{ steps.tf_outputs.outputs.service_name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v4'
+        with:
+          workload_identity_provider: 'projects/300110265956/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
+          service_account: 'github-actions-deployer@bootstrap-480122.iam.gserviceaccount.com'
+      # Install Terraform CLI
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      # Initialize (Downloads providers and connects to GCS Backend)
+      - name: Terraform Init
+        run: terraform init
+        working-directory: ./terraform-root # Ensure this matches your folder name
+
+      # Apply Infrastructure
+      - name: Terraform Apply
+        run: terraform apply -auto-approve
+        working-directory: ./terraform-root
+
+      # Extract Outputs for the next job
+      # We parse the json output to grab the Repository URL and Service Name
+      - name: Extract Terraform Outputs
+        id: tf_outputs
+        working-directory: ./terraform-root
+        run: |
+          echo "repo_url=$(terraform output -raw artifact_registry_url)" >> $GITHUB_OUTPUT
+          echo "service_name=$(terraform output -raw service_name >> $GITHUB_OUTPUT
+
+
   build:
     runs-on: ubuntu-latest
     steps:
@@ -35,16 +100,48 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v5
         with:
           go-version: '1.23'
 
-      - name: Verify Dependencies
-        run: go mod verify
-
-      - name: Run Tests
-        run: go test -v ./...
-
       - name: Build Binary
         run: go build -v ./cmd/api
-    
+  
+  deploy:
+    needs: terraform
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+     - name: Checkout code
+       uses: actions/checkout@v4
+
+     - id: 'auth'
+       uses: 'google-github-actions/auth@v4'
+       with:
+         workload_identity_provider: 'projects/300110265956/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
+         service_account: 'github-actions-deployer@bootstrap-480122.iam.gserviceaccount.com'
+
+     - name: Setup Cloud SDK
+       uses: google-github-actions/setup-gcloud@v4
+
+     - name: Configure Docker
+       run: |
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+     - name: Build Container image
+       run: |
+          docker build -t ${{ needs.terraform.outputs.repo_url }}/go-micro:${{ github.sha }} .
+
+     - name: Push Contianer image
+       run: |
+          docker push ${{ needs.terraform.outputs.repo_url }}/go-micro:${{ github.sha }}
+
+     - name: Deploy to cloud run
+       run: |
+         gcloud run deploy go-micro-service \
+            --image ${{ needs.terraform.outputs.repo_url }}/go-micro:${{ github.sha }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated
+
