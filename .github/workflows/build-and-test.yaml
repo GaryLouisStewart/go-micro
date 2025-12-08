@@ -76,7 +76,7 @@ jobs:
       - name: Build and Push Container
         run: |
           IMAGE_URI="${{ env.GAR_REPO }}/go-micro:${{ github.sha }}"
-          docker build -t $IMAGE_URI
+          docker build -t $IMAGE_URI .
           docker push $IMAGE_URI
 
 
