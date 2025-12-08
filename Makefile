@@ -51,5 +51,5 @@ help:
 				@echo "	test					 Run Go tests"
 				@echo "	podman-build	 Build the Container image"
 				@echo "	podman-run		 Run the application using podman"
-				@echo "	clean					 Remove build binanries"
+				@echo "	clean					 Remove build binaries"
 

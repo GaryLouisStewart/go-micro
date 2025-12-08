@@ -1,10 +1,20 @@
-name: Build and Test
+name: Build, Test and Deploy
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "dev" ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main", "dev" ]
+
+env:
+  PROJECT_ID: 'bootstrap-480122'
+  REGION: 'us-central1'
+  GAR_REPO: 'us-central1-docker.pkg.dev/bootstrap-480122/go-micro'
+  SERVICE_NAME_DEV: 'go-micro-dev'
+  SERVICE_NAME_PROD: 'go-micro-prod'
+  WIF_PROVIDER: 'projects/300110265956/locations/global/workloadIdentityPools/github-actions-gomicro/providers/github-provider'
+  WIF_SERVICE_ACCOUNT: 'github-actions-deployer@bootstrap-480122.iam.gserviceaccount.com'
+
 
 jobs:
   security-scan:
@@ -13,15 +23,12 @@ jobs:
      security-events: write
      actions: read
      contents: read
-   env:
-     GO111MODULE: on
    steps:
       - name: Checkout Source
         uses: actions/checkout@v4
       - name: Run Gosec Security Scanner
         uses: securego/gosec@master
         with:
-          # we let the report trigger content trigger a failure using the GitHub Security features.
           args: '-no-fail -fmt sarif -out results.sarif ./...'
       - name: Upload SARIF file
         uses: github/codeql-action/upload-sarif@v4
@@ -35,113 +42,111 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.23'
-
       - name: Verify dependencies
         run: go mod verify
-
       - name: Run Tests
         run: go test -v ./...
-
-  terraform:
-    needs: test-verify
+ 
+  build-push:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
+    # do not run on PRs, this avoids pushing Pull Request images to the registry.
+    if: github.event_name == 'push'
 
     permissions:
       contents: 'read'
       id-token: 'write'
 
-    outputs:
-      repo_url: ${{ steps.tf_outputs.outputs.repo_url }}
-      service_name: ${{ steps.tf_outputs.outputs.service_name }}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - id: 'auth'
         uses: 'google-github-actions/auth@v2'
         with:
-          workload_identity_provider: 'projects/300110265956/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
-          service_account: 'github-actions-deployer@bootstrap-480122.iam.gserviceaccount.com'
-      # Install Terraform CLI
-      - name: Setup Terraform
-        uses: hashicorp/setup-terraform@v3
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
 
-      # Initialize (Downloads providers and connects to GCS Backend)
-      - name: Terraform Init
-        run: terraform init
-        working-directory: ./terraform-root # Ensure this matches your folder name
-
-      # Apply Infrastructure
-      - name: Terraform Apply
-        run: terraform apply -auto-approve
-        working-directory: ./terraform-root
-
-      # Extract Outputs for the next job
-      # We parse the json output to grab the Repository URL and Service Name
-      - name: Extract Terraform Outputs
-        id: tf_outputs
-        working-directory: ./terraform-root
+      - name: Setup Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+      - name: Build and Push Container
         run: |
-          echo "repo_url=$(terraform output -raw artifact_registry_url)" >> $GITHUB_OUTPUT
-          echo "service_name=$(terraform output -raw service_name >> $GITHUB_OUTPUT
+          IMAGE_URI="${{ env.GAR_REPO }}/go-micro:${{ github.sha }}"
+          docker build -t $IMAGE_URI
+          docker push $IMAGE_URI
 
 
-  build:
+  deploy-dev:
+    needs: build-push
+    if: github.ref == 'refs/head/dev'
     runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v2'
         with:
-          go-version: '1.23'
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+      - name: Deploy to Cloud Run (Dev)
+        run: |
+          IMAGE_URI="${{ env.GAR_REPO }}/go-micro:${{ github.sha }}"
 
-      - name: Build Binary
-        run: go build -v ./cmd/api
-  
-  deploy:
-    needs: terraform
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
-
-    steps:
-     - name: Checkout code
-       uses: actions/checkout@v4
-
-     - id: 'auth'
-       uses: 'google-github-actions/auth@v2'
-       with:
-         workload_identity_provider: 'projects/300110265956/locations/global/workloadIdentityPools/github-actions-pool/providers/github-provider'
-         service_account: 'github-actions-deployer@bootstrap-480122.iam.gserviceaccount.com'
-
-     - name: Setup Cloud SDK
-       uses: google-github-actions/setup-gcloud@v2
-
-     - name: Configure Docker
-       run: |
-          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
-
-     - name: Build Container image
-       run: |
-          docker build -t ${{ needs.terraform.outputs.repo_url }}/go-micro:${{ github.sha }} .
-
-     - name: Push Contianer image
-       run: |
-          docker push ${{ needs.terraform.outputs.repo_url }}/go-micro:${{ github.sha }}
-
-     - name: Deploy to cloud run
-       run: |
-         gcloud run deploy go-micro-service \
-            --image ${{ needs.terraform.outputs.repo_url }}/go-micro:${{ github.sha }} \
+          gcloud run deploy ${{ env.SERVICE_NAME_DEV }} \
+            --image $IMAGE_URI
             --region ${{ env.REGION }} \
             --platform managed \
-            --allow-unauthenticated
+            --allow-unauthenticated \
+            --tag dev-${{ github.sha }}
 
+  deploy-prod:
+    needs: build-push
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      - id: 'auth'
+        uses: 'google-github-actions/auth@v2'
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+      - name: Deploy Revision (zero traffic)
+        run: |
+          IMAGE_URI="${{ env.GAR_REPO }}/go-micro:${{ github.sha }}"
+
+          gcloud run deploy ${{ env.SERVICE_NAME_PROD }} \
+            --image $IMAGE_URI \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --no-traffic \
+            --tag green
+
+      - name: Smoke test Green Revision
+        run: |
+          GREEN_URL=$(gcloud run services describe ${{ env.SERVICE_NAME_PROD }} --region ${{ env.REGION }} --format 'value(status.traffic[0].url)')
+
+          echo "Now testing green Revision @: $GREEN_URL"
+          curl -f -s -o /dev/null $GREEN_URL || exit 1
+
+      - name: Migrate Traffic to Green Revision
+        run: |
+          gcloud run services update-traffic ${{ env.SERVICE_NAME_PROD }} \
+          --region ${{ env.REGION }}
+          --to-tags green=100
+
+
+ 
