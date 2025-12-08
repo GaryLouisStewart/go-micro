@@ -10,8 +10,8 @@ env:
   PROJECT_ID: 'bootstrap-480122'
   REGION: 'us-central1'
   GAR_REPO: 'us-central1-docker.pkg.dev/bootstrap-480122/go-micro'
-  SERVICE_NAME_DEV: 'go-micro-dev'
-  SERVICE_NAME_PROD: 'go-micro-prod'
+  SERVICE_NAME_DEV: 'go-micro-dev-service'
+  SERVICE_NAME_PROD: 'go-micro-prod-service'
   WIF_PROVIDER: 'projects/300110265956/locations/global/workloadIdentityPools/github-actions-gomicro/providers/github-provider'
   WIF_SERVICE_ACCOUNT: 'github-actions-deployer@bootstrap-480122.iam.gserviceaccount.com'
 
