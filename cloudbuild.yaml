@@ -1,27 +1,36 @@
 steps:
-  - name: "gcr.io/cloud-builders/docker"
+  - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
       - '-t'
-      - '$_AR_HOSTNAME/$PROJECT_ID/hello-world-repo/go-micro:$COMMIT_SHA'
-      - "-t"
-      - $_AR_HOSTNAME/$PROJECT_ID/hello-world-repo/go-micro:latest'
-      - "."
-  - name: "gcr.io/cloud-builders/docker"
+      - '${_AR_HOSTNAME}/${PROJECT_ID}/hello-world-repo/go-micro:${COMMIT_SHA}'
+      - '-t'
+      - '${_AR_HOSTNAME}/${PROJECT_ID}/hello-world-repo/go-micro:latest'
+      - '.'
+
+  - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - '$_AR_HOSTNAME/$PROJECT_ID/hello-world-repo/go-micro'
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk'
+      - '--all-tags'
+      - '${_AR_HOSTNAME}/${PROJECT_ID}/hello-world-repo/go-micro'
+
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
       - 'go-micro-service'
       - '--image'
-      - '$_AR_HOSTNAME/$PROJECT_ID/hello-world-repo/go-micro:$COMMIT_SHA'
+      - '${_AR_HOSTNAME}/${PROJECT_ID}/hello-world-repo/go-micro:${COMMIT_SHA}'
       - '--region'
-      - '$_REGION'
+      - '${_REGION}'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+
 substitutions:
-  _AR_HOST_NAME: us-centra1-docker.pkg.dev
+  _AR_HOSTNAME: us-central1-docker.pkg.dev
   _REGION: us-central1
 
+options:
+  logging: CLOUD_LOGGING_ONLY

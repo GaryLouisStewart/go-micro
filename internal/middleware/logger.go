@@ -37,7 +37,7 @@ type statusRecorder struct {
 }
 
 
-func (rec *statusRecorder) Writeheader(code int) {
+func (rec *statusRecorder) WriteHeader(code int) {
 	rec.StatusCode = code
 	rec.ResponseWriter.WriteHeader(code)
 }

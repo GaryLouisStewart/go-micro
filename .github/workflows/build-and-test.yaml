@@ -82,7 +82,7 @@ jobs:
 
   deploy-dev:
     needs: build-push
-    if: github.ref == 'refs/head/dev'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
@@ -96,12 +96,14 @@ jobs:
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+      - name: Setup Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
       - name: Deploy to Cloud Run (Dev)
         run: |
           IMAGE_URI="${{ env.GAR_REPO }}/go-micro:${{ github.sha }}"
 
           gcloud run deploy ${{ env.SERVICE_NAME_DEV }} \
-            --image $IMAGE_URI
+            --image "$IMAGE_URI" \
             --region ${{ env.REGION }} \
             --platform managed \
             --allow-unauthenticated \
@@ -109,7 +111,7 @@ jobs:
 
   deploy-prod:
     needs: build-push
-    if: github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
@@ -123,12 +125,14 @@ jobs:
         with:
           workload_identity_provider: ${{ env.WIF_PROVIDER }}
           service_account: ${{ env.WIF_SERVICE_ACCOUNT }}
+      - name: Setup Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
       - name: Deploy Revision (zero traffic)
         run: |
           IMAGE_URI="${{ env.GAR_REPO }}/go-micro:${{ github.sha }}"
 
           gcloud run deploy ${{ env.SERVICE_NAME_PROD }} \
-            --image $IMAGE_URI \
+            --image "$IMAGE_URI" \
             --region ${{ env.REGION }} \
             --platform managed \
             --allow-unauthenticated \
@@ -137,16 +141,23 @@ jobs:
 
       - name: Smoke test Green Revision
         run: |
-          GREEN_URL=$(gcloud run services describe ${{ env.SERVICE_NAME_PROD }} --region ${{ env.REGION }} --format 'value(status.traffic[0].url)')
+          # The tagged revision URL is exposed at status.traffic[].url where tag == "green".
+          # gcloud format does not support JMESPath filters, so parse the JSON with jq.
+          GREEN_URL=$(gcloud run services describe ${{ env.SERVICE_NAME_PROD }} \
+            --region ${{ env.REGION }} \
+            --format=json | jq -r '.status.traffic[] | select(.tag == "green") | .url')
 
-          echo "Now testing green Revision @: $GREEN_URL"
-          curl -f -s -o /dev/null $GREEN_URL || exit 1
+          if [ -z "$GREEN_URL" ] || [ "$GREEN_URL" = "null" ]; then
+            echo "Could not resolve green revision URL" >&2
+            exit 1
+          fi
+
+          echo "Now testing green Revision @: $GREEN_URL/health"
+          curl -fsS "$GREEN_URL/health"
 
       - name: Migrate Traffic to Green Revision
         run: |
           gcloud run services update-traffic ${{ env.SERVICE_NAME_PROD }} \
-          --region ${{ env.REGION }}
-          --to-tags green=100
+            --region ${{ env.REGION }} \
+            --to-tags green=100
 
-
- 
